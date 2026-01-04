@@ -1,12 +1,12 @@
-name: Daily Flight Data Collection and Visualization
+name: Daily Flight Data Collection
 
 on:
   schedule:
-    - cron: '0 1 * * *'  # 每天 UTC 1点运行
+    - cron: '0 1 * * *'
   workflow_dispatch:
 
 jobs:
-  build-and-deploy:
+  build:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -29,14 +29,17 @@ jobs:
       run: |
         python collect_multi_flights.py
 
-    - name: Generate visualization files
+    # 关键：将新生成的 CSV 文件提交并推送到 GitHub
+    # 这样 Vercel 才能获取到最新的数据来构建网页
+    - name: Commit and push new data
       run: |
-        python generate_charts.py
-
-    # 新增：部署到 GitHub Pages
-    - name: Deploy to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v4
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./docs
-        force_orphan: true # 保持 gh-pages 分支干净
+        git config --global user.name 'GitHub Actions'
+        git config --global user.email 'actions@github.com'
+        git add flight_data_combined/
+        # 检查是否有新的提交
+        if ! git diff --quiet --exit-code --cached; then
+          git commit -m "Update flight data: $(date +'%Y-%m-%d')"
+          git push
+        else
+          echo "No new data to commit."
+        fi
