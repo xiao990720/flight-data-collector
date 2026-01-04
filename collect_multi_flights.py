@@ -176,12 +176,12 @@ if __name__ == "__main__":
     # main("2026-01-04") # 采集指定日期
 
     # --- 运行方式 2: 定时任务 ---
-    def scheduled_job():
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        main(yesterday)
+    # def scheduled_job():
+    #     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    #     main(yesterday)
 
-    schedule.every().day.at("01:00").do(scheduled_job)
-    logger.info(f"定时任务已启动，将在每天凌晨1点自动采集所有飞机前一天的航班数据...")
+   #  schedule.every().day.at("01:00").do(scheduled_job)
+    # logger.info(f"定时任务已启动，将在每天凌晨1点自动采集所有飞机前一天的航班数据...")
     
     while True:
         schedule.run_pending()
