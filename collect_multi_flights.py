@@ -7,27 +7,27 @@ import os
 import time
 import random
 import logging
-import atexit  # 导入atexit模块
 from datetime import datetime, timedelta
 
 import pandas as pd
 import schedule
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightwrightTimeoutError
+from playwright.sync_api import sync_playwright
+# 修正异常导入方式，确保能正确引用
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 # --- 1. 配置区 ---
-# 将所有需要采集的飞机注册号放在这个列表中
 TARGET_AIRCRAFT_LIST = [
     # 原始列表
-    # "B-919A", "B-919C", "B-919D", "B-919E", "B-919F", "B-919G", "B-919H",
-   #  "B-657S", "B-657T",
+   #  "B-919A", "B-919C", "B-919D", "B-919E", "B-919F", "B-919G", "B-919H",
+    "B-657S", "B-657T",
    #  "B-658E", "B-658U", "B-658V",
    #  "B-659Z",
    #  "B-65A0",
     # 新增列表
-    "B-919X", "B-919Y", "B-919Z", "B-919J",
+   #  "B-919X", "B-919Y", "B-919Z", "B-919J",
    #  "B-657J", "B-657X",
-   #  "B-658H", "B-658J", "B-658Q", "B-658R", "B-658N", "B-658P", "B-658X", "B-658W", "B-658Y",
-   #  "B-6593", "B-659K"
+    # "B-658H", "B-658J", "B-658Q", "B-658R", "B-658N", "B-658P", "B-658X", "B-658W", "B-658Y",
+    # "B-6593", "B-659K"
 ]
 
 # 日志配置
@@ -43,27 +43,8 @@ BASE_OUTPUT_DIR = "flight_data_combined"
 os.makedirs(BASE_OUTPUT_DIR, exist_ok=True)
 # --- 配置结束 ---
 
-# 全局变量用于跟踪浏览器实例
-browser = None
-
-def cleanup():
-    """程序退出时的清理函数"""
-    global browser
-    if browser:
-        try:
-            browser.close()
-            logger.info("程序退出时，已自动关闭浏览器实例")
-        except Exception as e:
-            logger.error(f"程序退出时关闭浏览器失败: {e}")
-
-# 注册退出时的清理函数
-atexit.register(cleanup)
-
 def collect_single_aircraft(aircraft_reg, date_str):
-    """
-    采集单个飞机在指定日期的航班数据
-    """
-    global browser  # 使用全局浏览器变量
+    """采集单个飞机在指定日期的航班数据"""
     logger.info(f"--- 开始从 FlightAware 采集 {aircraft_reg} 在 {date_str} 的航班 ---")
     
     flightaware_id = aircraft_reg.replace('-', '')
@@ -72,7 +53,6 @@ def collect_single_aircraft(aircraft_reg, date_str):
     flights = []
     
     with sync_playwright() as p:
-        # 更新全局浏览器实例
         browser = p.chromium.launch(headless=True, slow_mo=50)
         context = browser.new_context(
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -86,7 +66,8 @@ def collect_single_aircraft(aircraft_reg, date_str):
             
             flight_row_selector = "div.flightPageDataRowTall"
             logger.info(f"等待航班记录行加载...")
-            page.wait_for_selector(flight_row_selector, timeout=60000)
+            # 增加等待超时时间，并添加重试机制基础
+            page.wait_for_selector(flight_row_selector, timeout=120000)  # 延长至120秒
 
             time.sleep(3)
 
@@ -129,6 +110,7 @@ def collect_single_aircraft(aircraft_reg, date_str):
             
             logger.info(f"数据提取完成，共提取 {len(flights)} 条记录。")
 
+        # 确保异常捕获能正确识别
         except PlaywrightTimeoutError:
             logger.error(f"采集 {aircraft_reg} 时页面加载或元素等待超时。")
         except Exception as e:
@@ -137,8 +119,7 @@ def collect_single_aircraft(aircraft_reg, date_str):
             else:
                 logger.error(f"采集 {aircraft_reg} 时发生未知错误: {e}", exc_info=True)
         finally:
-            browser.close()  # 每次次采集集中关闭浏览器
-            browser = None  # 重置全局变量
+            browser.close()
 
     filtered_flights = []
     try:
@@ -154,9 +135,7 @@ def collect_single_aircraft(aircraft_reg, date_str):
     return filtered_flights
 
 def main(date_str=None):
-    """
-    主函数，循环处理飞机列表，将所有结果合并到一个文件中
-    """
+    """主函数，循环处理飞机列表，将所有结果合并到一个文件中"""
     if date_str is None:
         date_str = datetime.now().strftime("%Y-%m-%d")
     
@@ -196,12 +175,12 @@ if __name__ == "__main__":
     # main("2026-01-04") # 采集指定日期
 
     # --- 运行方式 2: 定时任务 ---
-   # def scheduled_job():
-    #    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    #    main(yesterday)
+    # def scheduled_job():
+    #     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    #     main(yesterday)
 
-   # schedule.every().day.at("01:00").do(scheduled_job)
-   # logger.info(f"定时任务已启动，将在每天凌晨1点自动采集所有飞机前一天的航班数据...")
+    # schedule.every().day.at("01:00").do(scheduled_job)
+    # logger.info(f"定时任务已启动，将在每天凌晨1点自动采集所有飞机前一天的航班数据...")
     
     while True:
         schedule.run_pending()
