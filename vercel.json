@@ -1,0 +1,6 @@
+{
+  "buildCommand": "python generate_data.py",
+  "outputDirectory": ".",
+  "devCommand": "echo \"Development server not needed\"",
+  "installCommand": "pip install -r requirements.txt"
+}
