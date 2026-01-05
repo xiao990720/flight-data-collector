@@ -1,45 +1,60 @@
-name: Daily Flight Data Collection
-
+name: Flight Data Collector
 on:
+  # 手动触发
+  workflow_dispatch:
+  # 定时触发（每天凌晨1点UTC，对应北京时间9点，可根据需要调整）
   schedule:
     - cron: '0 1 * * *'
-  workflow_dispatch:
 
 jobs:
-  build:
+  collect-flight-data:
     runs-on: ubuntu-latest
+    # 手动设置任务超时（30分钟，远低于6小时上限）
+    timeout-minutes: 30
+    # 赋予推送代码的权限
+    permissions:
+      contents: write
     steps:
-    - uses: actions/checkout@v4
+      # 1. 拉取仓库代码
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.9'
+      # 2. 配置Python环境
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      # 3. 安装Python依赖
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas playwright beautifulsoup4 schedule
 
-    - name: Install Playwright browsers
-      run: |
-        python -m playwright install chromium
+      # 4. 安装Playwright浏览器依赖
+      - name: Install Playwright system dependencies
+        run: |
+          python -m playwright install-deps chromium
+          python -m playwright install chromium
 
-    - name: Run the data collection script
-      run: |
-        python collect_multi_flights.py
+      # 5. 执行采集脚本
+      - name: Run data collection script
+        run: |
+          python collect_multi_flights.py
 
-    # 关键：将新生成的 CSV 文件提交并推送到 GitHub
-    # 这样 Vercel 才能获取到最新的数据来构建网页
-    - name: Commit and push new data
-      run: |
-        git config --global user.name 'GitHub Actions'
-        git config --global user.email 'actions@github.com'
-        git add flight_data_combined/
-        # 检查是否有新的提交
-        if ! git diff --quiet --exit-code --cached; then
-          git commit -m "Update flight data: $(date +'%Y-%m-%d')"
-          git push
-        else
-          echo "No new data to commit."
-        fi
+      # 6. 提交并推送生成的CSV文件
+      - name: Commit and push new data
+        run: |
+          # 配置Git用户信息
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          
+          # 检查是否有数据变更
+          git add flight_data_combined/
+          if ! git diff --quiet --exit-code --cached; then
+            git commit -m "Update flight data: $(date +'%Y-%m-%d')"
+            git push
+            echo "数据已提交并推送"
+          else
+            echo "无新数据需要提交"
+          fi
