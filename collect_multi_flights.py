@@ -1,33 +1,38 @@
 # -*- coding: utf-8 -*-
 """
 多飞机航班信息采集脚本 (合并输出到单个CSV文件)
+修复点：
+1. 移除无限定时循环，适配GitHub Actions一次性执行特性
+2. 修复PlaywrightTimeoutError异常引用
+3. 复用浏览器实例缩短执行时间
+4. 强制进程退出避免残留
+5. 增加atexit清理浏览器进程
 """
 
 import os
+import sys
 import time
 import random
 import logging
+import atexit
 from datetime import datetime, timedelta
 
 import pandas as pd
-import schedule
 from playwright.sync_api import sync_playwright
-# 修正异常导入方式，确保能正确引用
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 # --- 1. 配置区 ---
+# 目标飞机注册号列表
 TARGET_AIRCRAFT_LIST = [
-    # 原始列表
-   #  "B-919A", "B-919C", "B-919D", "B-919E", "B-919F", "B-919G", "B-919H",
-    "B-657S", "B-657T",
-   #  "B-658E", "B-658U", "B-658V",
-   #  "B-659Z",
-   #  "B-65A0",
-    # 新增列表
-   #  "B-919X", "B-919Y", "B-919Z", "B-919J",
-   #  "B-657J", "B-657X",
-    # "B-658H", "B-658J", "B-658Q", "B-658R", "B-658N", "B-658P", "B-658X", "B-658W", "B-658Y",
-    # "B-6593", "B-659K"
+   # "B-919A", "B-919C", "B-919D", "B-919E", "B-919F", "B-919G", "B-919H",
+   # "B-657S", "B-657T",
+   # "B-658E", "B-658U", "B-658V",
+    #"B-659Z",
+    #"B-65A0",
+    "B-919X", "B-919Y", "B-919Z", "B-919J",
+    #"B-657J", "B-657X",
+    #"B-658H", "B-658J", "B-658Q", "B-658R", "B-658N", "B-658P", "B-658X", "B-658W", "B-658Y",
+    #"B-6593", "B-659K"
 ]
 
 # 日志配置
@@ -41,18 +46,129 @@ logger = logging.getLogger(__name__)
 # 主输出目录
 BASE_OUTPUT_DIR = "flight_data_combined"
 os.makedirs(BASE_OUTPUT_DIR, exist_ok=True)
-# --- 配置结束 ---
 
+# 全局浏览器实例（用于复用）
+browser = None
+context = None
+page = None
+
+# --- 2. 清理函数（确保进程退出） ---
+def cleanup_resources():
+    """程序退出时清理浏览器资源"""
+    global browser, context, page
+    logger.info("开始清理浏览器资源...")
+    try:
+        if page:
+            page.close()
+        if context:
+            context.close()
+        if browser:
+            browser.close()
+        logger.info("浏览器资源清理完成")
+    except Exception as e:
+        logger.error(f"清理资源时出错: {e}", exc_info=True)
+
+# 注册退出清理函数
+atexit.register(cleanup_resources)
+
+# --- 3. 核心采集函数 ---
 def collect_single_aircraft(aircraft_reg, date_str):
-    """采集单个飞机在指定日期的航班数据"""
-    logger.info(f"--- 开始从 FlightAware 采集 {aircraft_reg} 在 {date_str} 的航班 ---")
+    """
+    采集单个飞机在指定日期的航班数据（复用全局浏览器实例）
+    """
+    global page
+    logger.info(f"--- 开始采集 {aircraft_reg} 在 {date_str} 的航班 ---")
     
     flightaware_id = aircraft_reg.replace('-', '')
     url = f"https://www.flightaware.com/live/flight/{flightaware_id}"
     
     flights = []
     
+    try:
+        logger.info(f"加载页面: {url}")
+        # 页面跳转（设置120秒超时，避免卡壳）
+        page.goto(url, wait_until="domcontentloaded", timeout=120000)
+        
+        # 等待航班数据行加载
+        flight_row_selector = "div.flightPageDataRowTall"
+        logger.info("等待航班记录行加载...")
+        page.wait_for_selector(flight_row_selector, timeout=60000)
+        
+        # 短暂等待动态数据加载
+        time.sleep(3)
+        
+        # 解析页面数据
+        content = page.content()
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(content, 'html.parser')
+        
+        all_rows = soup.select(flight_row_selector)
+        logger.info(f"找到 {len(all_rows)} 条航班记录")
+        
+        # 提取每条航班信息
+        for row in all_rows:
+            date_div = row.select_one('div.flightPageActivityLogDate')
+            if not date_div:
+                continue
+            
+            date_text = date_div.get_text(strip=True)[-11:]
+            info_divs = row.select('div.flightPageActivityLogData')[1:3]
+            if len(info_divs) < 2:
+                continue
+                
+            dep_div, arr_div = info_divs
+            dep_airport = dep_div.select_one('a').text.strip() if dep_div.select_one('a') else 'N/A'
+            dep_time = dep_div.select_one('span.noWrapTime').text.strip() if dep_div.select_one('span.noWrapTime') else 'N/A'
+            arr_airport = arr_div.select_one('a').text.strip() if arr_div.select_one('a') else 'N/A'
+            arr_time = arr_div.select_one('span.noWrapTime').text.strip() if arr_div.select_one('span.noWrapTime') else 'N/A'
+            
+            flights.append({
+                'registration': aircraft_reg,
+                'date': date_text,
+                'departure_airport': dep_airport,
+                'departure_time': dep_time,
+                'arrival_airport': arr_airport,
+                'arrival_time': arr_time,
+                'status': 'Completed'
+            })
+        
+        logger.info(f"提取 {len(flights)} 条原始记录")
+
+    except PlaywrightTimeoutError:
+        logger.error(f"{aircraft_reg} 页面加载/元素等待超时")
+    except Exception as e:
+        logger.error(f"{aircraft_reg} 采集失败: {e}", exc_info=True)
+    
+    # 筛选目标日期的航班
+    filtered_flights = []
+    try:
+        target_date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+        target_date_str_dmy = target_date_obj.strftime('%d-%b-%Y')
+        target_date_str_dmy_no_zero = target_date_obj.strftime('%-d-%b-%Y')
+        filtered_flights = [f for f in flights if f['date'] in (target_date_str_dmy, target_date_str_dmy_no_zero)]
+        logger.info(f"{aircraft_reg} 筛选出 {len(filtered_flights)} 条 {date_str} 的航班")
+    except ValueError:
+        logger.error(f"日期格式错误: {date_str}")
+    
+    return filtered_flights
+
+# --- 4. 主函数 ---
+def main(date_str=None):
+    """
+    主执行函数：初始化浏览器 + 批量采集 + 生成CSV
+    """
+    global browser, context, page
+    
+    # 默认采集前一天数据（适配定时执行）
+    if date_str is None:
+        date_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    logger.info(f"===== 开始批量采集 {date_str} 航班数据 =====")
+    all_flights_data = []
+    
+    # 初始化Playwright浏览器（全局复用）
     with sync_playwright() as p:
+        logger.info("启动Chromium浏览器...")
         browser = p.chromium.launch(headless=True, slow_mo=50)
         context = browser.new_context(
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -60,128 +176,38 @@ def collect_single_aircraft(aircraft_reg, date_str):
         )
         page = context.new_page()
         
-        try:
-            logger.info(f"正在加载页面: {url}")
-            page.goto(url, wait_until="domcontentloaded", timeout=180000) 
+        # 遍历所有飞机采集数据
+        for i, aircraft_reg in enumerate(TARGET_AIRCRAFT_LIST):
+            # 采集单架飞机数据
+            results = collect_single_aircraft(aircraft_reg, date_str)
             
-            flight_row_selector = "div.flightPageDataRowTall"
-            logger.info(f"等待航班记录行加载...")
-            # 增加等待超时时间，并添加重试机制基础
-            page.wait_for_selector(flight_row_selector, timeout=120000)  # 延长至120秒
-
-            time.sleep(3)
-
-            content = page.content()
-            
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(content, 'html.parser')
-            
-            all_rows = soup.select(flight_row_selector)
-            logger.info(f"页面上共找到 {len(all_rows)} 条航班记录。")
-
-            for row in all_rows:
-                date_div = row.select_one('div.flightPageActivityLogDate')
-                if not date_div:
-                    continue
-                
-                date_text = date_div.get_text(strip=True)[-11:]
-                
-                info_divs = row.select('div.flightPageActivityLogData')[1:3]
-                if len(info_divs) < 2:
-                    continue
-                    
-                dep_div, arr_div = info_divs
-                
-                dep_airport = dep_div.select_one('a').text.strip() if dep_div.select_one('a') else 'N/A'
-                dep_time = dep_div.select_one('span.noWrapTime').text.strip() if dep_div.select_one('span.noWrapTime') else 'N/A'
-                arr_airport = arr_div.select_one('a').text.strip() if arr_div.select_one('a') else 'N/A'
-                arr_time = arr_div.select_one('span.noWrapTime').text.strip() if arr_div.select_one('span.noWrapTime') else 'N/A'
-                
-                flight_info = {
-                    'registration': aircraft_reg,
-                    'date': date_text,
-                    'departure_airport': dep_airport,
-                    'departure_time': dep_time,
-                    'arrival_airport': arr_airport,
-                    'arrival_time': arr_time,
-                    'status': 'Completed'
-                }
-                flights.append(flight_info)
-            
-            logger.info(f"数据提取完成，共提取 {len(flights)} 条记录。")
-
-        # 确保异常捕获能正确识别
-        except PlaywrightTimeoutError:
-            logger.error(f"采集 {aircraft_reg} 时页面加载或元素等待超时。")
-        except Exception as e:
-            if "net::ERR_CONNECTION_CLOSED" in str(e) or "Page.goto" in str(e):
-                logger.error(f"采集 {aircraft_reg} 时发生网络连接错误: {e}. 服务器可能中断了连接。")
+            if results:
+                logger.info(f"添加 {aircraft_reg} 的 {len(results)} 条数据到总列表")
+                all_flights_data.extend(results)
             else:
-                logger.error(f"采集 {aircraft_reg} 时发生未知错误: {e}", exc_info=True)
-        finally:
-            browser.close()
-
-    filtered_flights = []
-    try:
-        target_date_obj = datetime.strptime(date_str, '%Y-%m-%d')
-        target_date_str_dmy = target_date_obj.strftime('%d-%b-%Y')
-        target_date_str_dmy_no_zero = target_date_obj.strftime('%-d-%b-%Y')
-        
-        filtered_flights = [f for f in flights if f['date'] in (target_date_str_dmy, target_date_str_dmy_no_zero)]
-        logger.info(f"从历史记录中筛选出 {date_str} 的航班: {len(filtered_flights)} 条。")
-    except ValueError:
-        logger.error(f"日期格式错误: {date_str}")
-
-    return filtered_flights
-
-def main(date_str=None):
-    """主函数，循环处理飞机列表，将所有结果合并到一个文件中"""
-    if date_str is None:
-        date_str = datetime.now().strftime("%Y-%m-%d")
-    
-    logger.info(f"===== 开始批量采集 {date_str} 的航班信息 (合并输出) =====")
-    
-    all_flights_data = []
-    
-    for i, aircraft_reg in enumerate(TARGET_AIRCRAFT_LIST):
-        results = collect_single_aircraft(aircraft_reg, date_str)
-        
-        if results:
-            logger.info(f"将 {aircraft_reg} 的 {len(results)} 条航班数据添加到总列表中...")
-            all_flights_data.extend(results)
-        else:
-            logger.warning(f"{aircraft_reg} 在 {date_str} 未采集到任何航班数据。")
+                logger.warning(f"{aircraft_reg} 未采集到 {date_str} 的数据")
             
-        if i < len(TARGET_AIRCRAFT_LIST) - 1:
-            delay_time = random.randint(15, 30)
-            logger.info(f"--- 等待 {delay_time} 秒后，继续采集下一个飞机... ---")
-            time.sleep(delay_time)
-            
+            # 非最后一架飞机，添加随机延时（降低请求频率）
+            if i < len(TARGET_AIRCRAFT_LIST) - 1:
+                delay_time = random.randint(5, 10)  # 缩短延时至5-10秒
+                logger.info(f"等待 {delay_time} 秒后采集下一架飞机...")
+                time.sleep(delay_time)
+    
+    # 生成合并CSV文件
     if all_flights_data:
-        logger.info(f"===== 所有飞机采集完成，共汇总 {len(all_flights_data)} 条航班数据。准备写入文件... =====")
+        logger.info(f"===== 采集完成，共 {len(all_flights_data)} 条数据 =====")
         df = pd.DataFrame(all_flights_data)
-        filename = os.path.join(BASE_OUTPUT_DIR, f"all_flights_{date_str}.csv")
-        df.to_csv(filename, index=False, encoding='utf-8-sig')
-        logger.info(f"所有数据已成功合并并保存至: {filename}")
+        csv_path = os.path.join(BASE_OUTPUT_DIR, f"all_flights_{date_str}.csv")
+        df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+        logger.info(f"数据已保存至: {csv_path}")
     else:
-        logger.warning("===== 所有飞机采集完成，但未采集到任何航班数据。不生成文件。=====")
-        
-    logger.info(f"===== 所有飞机采集任务结束 =====")
-    print("-" * 50)
-
-if __name__ == "__main__":
-    # --- 运行方式 1: 单次运行 ---
-    main() # 采集今天
-    # main("2026-01-04") # 采集指定日期
-
-    # --- 运行方式 2: 定时任务 ---
-    # def scheduled_job():
-    #     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    #     main(yesterday)
-
-    # schedule.every().day.at("01:00").do(scheduled_job)
-    # logger.info(f"定时任务已启动，将在每天凌晨1点自动采集所有飞机前一天的航班数据...")
+        logger.warning("===== 未采集到任何航班数据，不生成文件 =====")
     
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+    logger.info(f"===== 所有采集任务结束 =====")
+    # 强制退出进程，避免GitHub Actions超时
+    sys.exit(0)
+
+# --- 5. 执行入口 ---
+if __name__ == "__main__":
+    # 仅执行单次采集（无无限循环）
+    main()
